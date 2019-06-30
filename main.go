@@ -1,25 +1,37 @@
 package main
 
 import (
+	"archive/zip"
+	"bufio"
 	"fmt"
-	"github.com/akamensky/argparse"
-	"os"
+	"github.com/docopt/docopt-go"
+	"github.com/BurntSushi/toml"
+	"golang.org/x/net/html"
 	"io"
 	"io/ioutil"
-	"bufio"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"net/url"
-	"net/http"
-	"golang.org/x/net/html"
-	"archive/zip"
-	"path/filepath"
+	"os/user"
+	"path"
 )
 
+var addon_dir string = ""
+const base_url string = "https://www.esoui.com"
+const search_url string = "/downloads/search.php"
+
+type Config struct {
+	AddonsPath string
+}
+
 type AddOn struct {
-	title string
+	title       string
 	description string
-	depends []string
+	depends     []string
+	version     string
 }
 
 func getDownloadLink(resp http.Response, content string) (string, error) {
@@ -40,7 +52,6 @@ func getDownloadLink(resp http.Response, content string) (string, error) {
 			text := string(z.Text())
 
 			if t.Data == "a" {
-				fmt.Printf("Checking link for %v == %v\n", text, content)
 				if text != content {
 					continue
 				}
@@ -95,6 +106,10 @@ func scanDirectory(path string) (*AddOn, error) {
 			addon.title = matches[2]
 		case "DependsOn":
 			addon.depends = strings.Split(matches[2], " ")
+		case "Version":
+			addon.version = matches[2]
+		case "Description":
+			addon.description = matches[2]
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -104,26 +119,28 @@ func scanDirectory(path string) (*AddOn, error) {
 }
 
 func downloadPlugin(v, addon_dir, base_url, search_url string) error {
-	// If there is a -, it's for a specific version
-	parts := strings.Split(v, "-")
-	v = parts[0]
-	// Find the plugin from esoui.com
-	values := url.Values{}
-	values.Add("x", "0")
-	values.Add("y", "0")
-	values.Add("search", v)
-	resp, err := http.PostForm(fmt.Sprintf("%s/%s", base_url, search_url), values)
-	if err != nil {
-		return err
+	var resp *http.Response
+	var err error
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		resp, err = http.Get(v)
+	} else {
+		// If there is a -, it's for a specific version
+		parts := strings.Split(v, "-")
+		v = parts[0]
+		// Find the plugin from esoui.com
+		values := url.Values{}
+		values.Add("x", "0")
+		values.Add("y", "0")
+		values.Add("search", v)
+		resp, err = http.PostForm(fmt.Sprintf("%s/%s", base_url, search_url), values)
+		if err != nil {
+			return err
+		}
 	}
 	download_link, err := getDownloadLink(*resp, "Download")
 	resp.Body.Close()
 	if err != nil {
-		// Maybe we go the search page? In which case, follow the first link (most popular)
-		fmt.Printf("Checking to see if we ended up in search page for %v...\n", v)
-		resp, err := http.PostForm(fmt.Sprintf("%s/%s", base_url, search_url), values)
-		download_link, err = getDownloadLink(*resp, v)
-		resp.Body.Close()
+		fmt.Printf("Failed to find plugin %v; consider just pasting a link\n", v)
 		if err != nil {
 			return err
 		}
@@ -135,7 +152,6 @@ func downloadPlugin(v, addon_dir, base_url, search_url string) error {
 	}
 	download_link = getCDNDownloadLink(*resp)
 	resp.Body.Close()
-
 
 	resp, err = http.Get(download_link)
 	if err != nil {
@@ -193,66 +209,121 @@ func downloadPlugin(v, addon_dir, base_url, search_url string) error {
 	return nil
 }
 
-func main() {
-	addon_dir := "/media/data/SteamLibrary/steamapps/compatdata/306130/pfx/drive_c/users/steamuser/My Documents/Elder Scrolls Online/live/AddOns"
-	base_url := "https://www.esoui.com"
-	search_url := "/downloads/search.php"
-	// Create new parser object
-	parser := argparse.NewParser("eso-plugins", "Manages plugins for The Elder Scrolls online")
-	// Create string flag
-	list := parser.Flag("l", "list", &argparse.Options{Required: false, Help: "Print the known installed packages"})
-	// Parse input
-	err := parser.Parse(os.Args)
+func updatePlugins(force_install bool) {
+	fmt.Printf("Walking dir %s\n", addon_dir)
+	files, err := ioutil.ReadDir(addon_dir)
 	if err != nil {
-		// In case of error print error and print usage
-		// This can also be done by passing -h or --help flags
-		fmt.Print(parser.Usage(err))
-		return
+		panic(err)
 	}
-	if *list {
+	addons := make(map[string]AddOn)
+	required := []string{}
+	for _, file := range files {
+		fmt.Printf("Looking at %s\n", file.Name())
+		path := fmt.Sprintf("%s/%s/%s.txt", addon_dir, file.Name(), file.Name())
+		addon, err := scanDirectory(path)
+		if err != nil {
+			fmt.Printf("Got error in %v: %v\n", path, err)
+			continue
+		}
+		addons[file.Name()] = *addon
+		required = append(required, addon.depends...)
+	}
+	// Make sure all plugins are installed...
+	for len(required) > 0 {
+		v := required[0]
+		if _, ok := addons[v]; !ok || force_install {
+			fmt.Printf("Updating plugin: %v\n", v)
+
+			err := downloadPlugin(v, addon_dir, base_url, search_url)
+			if err != nil {
+				fmt.Printf("Failed to install plugin %v: %v", v, err)
+				required = required[1:]
+				continue
+			}
+
+			fmt.Printf("Done!\n")
+			path := fmt.Sprintf("%s/%s/%s.txt", addon_dir, v, v)
+			addon, err := scanDirectory(path)
+			if err != nil {
+				fmt.Printf("Got error in %v: %v\n", path, err)
+				continue
+			}
+			addons[v] = *addon
+			required = append(required, addon.depends...)
+		}
+		required = required[1:]
+	}
+
+}
+
+func main() {
+
+	usage := `ESO addon manager
+
+Usage:
+	eso-addons [options] list
+	eso-addons [options] install (<plugin name>...)
+	eso-addons [options] update
+
+Options:
+	-c, --config <path>	Config to load; defaults to ~/.eso_addons
+		The config file is a TOML document which currently supports only
+		one option; AddonsPath. Thhis should point to the ESO AddOns folder
+	-p, --path <path>	Path to the ESO addons folder.
+	`
+	// Create new parser object
+	arguments, err := docopt.ParseDoc(usage)
+	if err != nil {
+		panic(err)
+	}
+
+	user, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+	if arguments["--config"] == nil {
+		arguments["--config"] = path.Join(user.HomeDir, ".eso_addons")
+	}
+	if arguments["--path"] == nil {
+		var conf Config
+		arguments["--path"] = path.Join(user.HomeDir, "My Documents", "Elder Scrolls Online", "live", "AddOns")
+		if _, err := toml.DecodeFile(arguments["--config"].(string), &conf); err != nil {
+			fmt.Printf("Warning; failed to find config file %v\n", arguments["--config"].(string))
+			// No idea; just select the default path
+		} else if conf.AddonsPath != "" {
+			arguments["--path"] = conf.AddonsPath
+		}
+	}
+
+	addon_dir = arguments["--path"].(string)
+	if arguments["install"].(bool) {
+		plugin_names := arguments["<plugin name>"].([]string)
+		for _, plugin_name := range plugin_names {
+			err := downloadPlugin(plugin_name, addon_dir, base_url, search_url)
+			if err != nil {
+				fmt.Printf("Failed to install plugin %v: %v", plugin_name, err)
+				return
+			}
+			updatePlugins(false)
+		}
+		fmt.Printf("Done!\n")
+
+	} else if arguments["list"].(bool) {
 		fmt.Printf("Walking dir %s\n", addon_dir)
 		files, err := ioutil.ReadDir(addon_dir)
 		if err != nil {
 			panic(err)
 		}
-		addons := make(map[string]AddOn)
-		required := []string{}
 		for _, file := range files {
-			fmt.Printf("Looking at %s\n", file.Name())
 			path := fmt.Sprintf("%s/%s/%s.txt", addon_dir, file.Name(), file.Name())
 			addon, err := scanDirectory(path)
 			if err != nil {
 				fmt.Printf("Got error in %v: %v\n", path, err)
 				continue
 			}
-			addons[file.Name()] = *addon
-			required = append(required, addon.depends...)
+			fmt.Printf("%v %v -- %v\n", addon.title, addon.version, addon.description)
 		}
-
-		// Make sure all plugins are installed...
-		for len(required) > 0 {
-			v := required[0]
-			if _, ok := addons[v]; !ok {
-				fmt.Printf("Missing plugin: %v\n", v)
-
-				err := downloadPlugin(v, addon_dir, base_url, search_url)
-				if err != nil {
-					fmt.Printf("Failed to install plugin %v: %v", v, err)
-					required = required[1:]
-					continue
-				}
-
-				fmt.Printf("Done!\n")
-				path := fmt.Sprintf("%s/%s/%s.txt", addon_dir, v, v)
-				addon, err := scanDirectory(path)
-				if err != nil {
-					fmt.Printf("Got error in %v: %v\n", path, err)
-					continue
-				}
-				addons[v] = *addon
-				required = append(required, addon.depends...)
-			}
-			required = required[1:]
-		}
+	} else if arguments["update"].(bool) {
+		updatePlugins(true)
 	}
 }

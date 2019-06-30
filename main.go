@@ -4,22 +4,24 @@ import (
 	"archive/zip"
 	"bufio"
 	"fmt"
-	"github.com/docopt/docopt-go"
 	"github.com/BurntSushi/toml"
+	"github.com/docopt/docopt-go"
 	"golang.org/x/net/html"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"regexp"
-	"strings"
 	"os/user"
 	"path"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
 )
 
 var addon_dir string = ""
+
 const base_url string = "https://www.esoui.com"
 const search_url string = "/downloads/search.php"
 
@@ -286,7 +288,11 @@ Options:
 	}
 	if arguments["--path"] == nil {
 		var conf Config
-		arguments["--path"] = path.Join(user.HomeDir, "My Documents", "Elder Scrolls Online", "live", "AddOns")
+		if runtime.GOOS == "windows" {
+			arguments["--path"] = path.Join(user.HomeDir, "My Documents", "Elder Scrolls Online", "live", "AddOns")
+		} else {
+			arguments["--path"] = path.Join(user.HomeDir, ".steam", "steamapps", "compatdata", "306130", "pfx", "drive_c", "users", "steamuser", "My Documents", "Elder Scrolls Online", "live", "AddOns")
+		}
 		if _, err := toml.DecodeFile(arguments["--config"].(string), &conf); err != nil {
 			fmt.Printf("Warning; failed to find config file %v\n", arguments["--config"].(string))
 			// No idea; just select the default path

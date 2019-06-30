@@ -7,7 +7,7 @@ Huzzah! ESO Addon Manager was created!
 ## Installation
 
 ```
-go get github/chathaway-codes/eso-addons
+go get github.com/chathaway-codes/eso-addons
 ```
 
 ## Usage
@@ -31,3 +31,13 @@ Options:
 
 Plugin names will be searched for on https://www.esoui.com/; if there is not an exact match, installation will fail.
 In that case, use an absolute URL to install the plugin.
+
+## Setup
+
+If you're running on Linux with a non-default Steam configuration, create a ~/.eso_addons with contents like:
+
+```
+AddonsPath = "~/.steam/steamapps/compatdata/306130/pfx/drive_c/users/steamuser/My Documents/Elder Scrolls Online/live/AddOns"
+```
+
+Updating the path as needed

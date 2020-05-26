@@ -89,6 +89,22 @@ func getCDNDownloadLink(resp http.Response) string {
 	}
 }
 
+var dependencyRegexp = regexp.MustCompile(`([^><=]+).*`)
+
+func extractDependency(line string) []string {
+	// just splitting the line gives us most, but some addon's now support 'semantic versioning'
+	// so we need to extract that bit out
+	var out []string
+	for _, part := range strings.Split(line, " ") {
+		t := dependencyRegexp.FindStringSubmatch(part)
+		if len(t) <= 1 {
+			continue
+		}
+		out = append(out, t[1:]...)
+	}
+	return out
+}
+
 func scanDirectory(path string) (*AddOn, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -107,7 +123,7 @@ func scanDirectory(path string) (*AddOn, error) {
 		case "Title":
 			addon.title = matches[2]
 		case "DependsOn":
-			addon.depends = strings.Split(matches[2], " ")
+			addon.depends = extractDependency(matches[2])
 		case "Version":
 			addon.version = matches[2]
 		case "Description":
@@ -211,6 +227,19 @@ func downloadPlugin(v, addon_dir, base_url, search_url string) error {
 	return nil
 }
 
+func fuzzyMatch(directory string, filename string) (string, error) {
+	files, err := ioutil.ReadDir(directory)
+	if err != nil {
+		return "", fmt.Errorf("error scanning directory %s: %v", directory, err)
+	}
+	for _, file := range files {
+		if strings.ToLower(file.Name()) == strings.ToLower(filename) {
+			return file.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("failed to find a matching file %s in %s", filename, directory)
+}
+
 func updatePlugins(force_install bool) {
 	fmt.Printf("Walking dir %s\n", addon_dir)
 	files, err := ioutil.ReadDir(addon_dir)
@@ -222,9 +251,21 @@ func updatePlugins(force_install bool) {
 	for _, file := range files {
 		fmt.Printf("Looking at %s\n", file.Name())
 		path := fmt.Sprintf("%s/%s/%s.txt", addon_dir, file.Name(), file.Name())
+		fuzzyDir, err := fuzzyMatch(addon_dir, file.Name())
+		if err != nil {
+			fmt.Printf("Problem finding plugin metadata in %v: %v\n", path, err)
+			continue
+		}
+		path = fmt.Sprintf("%s/%s/", addon_dir, fuzzyDir)
+		fuzzyFile, err := fuzzyMatch(path, fmt.Sprintf("%s.txt", file.Name()))
+		if err != nil {
+			fmt.Printf("Problem finding plugin metadata in %v: %v\n", path, err)
+			continue
+		}
+		path = fmt.Sprintf("%s/%s", path, fuzzyFile)
 		addon, err := scanDirectory(path)
 		if err != nil {
-			fmt.Printf("Got error in %v: %v\n", path, err)
+			fmt.Printf("Problem finding plugin metadata in %v: %v\n", path, err)
 			continue
 		}
 		addons[file.Name()] = *addon
